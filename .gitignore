@@ -1,0 +1,5 @@
+# Gizli bilgiler asla git'e girmez
+.env
+
+# macOS
+.DS_Store

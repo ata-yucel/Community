@@ -1,0 +1,124 @@
+name: community
+
+# Faz 0 — platform iskeleti.
+# Gateway (Traefik) + Postgres + Redis + RabbitMQ + MinIO + Jaeger
+# ve gateway arkasında referans bir Auth servisi (şimdilik sadece /health).
+
+services:
+  # --- API Gateway --------------------------------------------------------
+  traefik:
+    image: traefik:v3.3
+    container_name: traefik
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"                      # sadece lokal geliştirme için
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"        # tüm /api/* trafiği buradan geçer
+      - "8080:8080"    # Traefik dashboard -> http://localhost:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [appnet]
+
+  # --- İlişkisel veritabanı (servis başına ayrı database) -----------------
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_MULTIPLE_DATABASES: ${POSTGRES_MULTIPLE_DATABASES}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh:ro
+    ports:
+      - "5432:5432"
+    networks: [appnet]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Cache / geo / pub-sub ----------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks: [appnet]
+
+  # --- Message broker (asenkron event'ler) --------------------------------
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "5672:5672"      # AMQP (servisler buraya bağlanır)
+      - "15672:15672"    # Yönetim arayüzü -> http://localhost:15672
+    networks: [appnet]
+
+  # --- Object storage (fotoğraf / snap) -----------------------------------
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"      # S3 API
+      - "9001:9001"      # Konsol -> http://localhost:9001
+    networks: [appnet]
+
+  # --- Distributed tracing -------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"    # Jaeger UI -> http://localhost:16686
+      - "4317:4317"      # OTLP gRPC (servisler trace'i buraya yollar)
+      - "4318:4318"      # OTLP HTTP
+    networks: [appnet]
+
+  # --- Referans servis: Auth ----------------------------------------------
+  # Şimdilik sadece /health döndürür. Gerçek mantık (kayıt, JWT, event)
+  # bir sonraki adımda eklenecek. Buradaki amaç uçtan uca yolu kanıtlamak.
+  auth-service:
+    build: ./services/auth-service
+    container_name: auth-service
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/auth_db
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      # /api/auth/* -> auth-service, prefix soyularak servise iletilir
+      - "traefik.http.routers.auth.rule=PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.auth.entrypoints=web"
+      - "traefik.http.services.auth.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.auth-strip.stripprefix.prefixes=/api/auth"
+      - "traefik.http.routers.auth.middlewares=auth-strip"
+    networks: [appnet]
+
+networks:
+  appnet:
+    driver: bridge
+
+volumes:
+  pgdata:
+  miniodata:

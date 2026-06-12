@@ -1,0 +1,18 @@
+# Ortam değişkenleri (sırlar)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Node / Expo (frontend)
+node_modules/
+.expo/
+dist/
+
+# Editör / OS
+.DS_Store
+.idea/
+.vscode/
