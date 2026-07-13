@@ -2,7 +2,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import Base, engine, get_db, wait_for_db
+from .events import publish_user_registered
 from .models import User
 from .schemas import LoginIn, RegisterIn, TokenOut, UserOut
 from .security import (
@@ -81,6 +82,9 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=409, detail="Email already registered")
     db.refresh(user)
+    # Kayıt veritabanına işlendi; artık dünyaya duyurabiliriz. Yayın başarısız
+    # olsa bile kayıt geri alınmaz (fonksiyon hatayı içeride loglar ve yutar).
+    publish_user_registered(str(user.id), user.email)
     return user
 
 
@@ -145,3 +149,13 @@ def get_current_user(
 @app.get("/me", response_model=UserOut)
 def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@app.get("/verify")
+def verify(response: Response, current_user: User = Depends(get_current_user)):
+    # Traefik ForwardAuth için: 2xx = token geçerli. X-User-Id yanıt başlığı,
+    # gateway tarafından (authResponseHeaders) asıl isteğe kopyalanır ve
+    # arkadaki servis kullanıcıyı bu başlıktan tanır.
+    response.headers["X-User-Id"] = str(current_user.id)
+    response.headers["Cache-Control"] = "no-store"  # kimlik yanıtı asla cache'lenmesin
+    return {"user_id": str(current_user.id)}

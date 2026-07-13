@@ -1,14 +1,16 @@
 name: community
 
-# Faz 0 — platform iskeleti.
-# Gateway (Traefik) + Postgres + Redis + RabbitMQ + MinIO + Jaeger
-# ve gateway arkasında referans bir Auth servisi (şimdilik sadece /health).
+# Faz 2 — olay güdümlü mimari.
+# Gateway (Traefik) + Postgres + Redis + RabbitMQ + MinIO + Jaeger.
+# Auth: kayıt/login/JWT + user.registered olayı + /verify (ForwardAuth hedefi).
+# Profile: API (X-User-Id ile) + olay tüketicisi (ayrı konteyner).
 
 services:
   # --- API Gateway --------------------------------------------------------
   traefik:
     image: traefik:v3.3
     container_name: traefik
+    restart: unless-stopped
     command:
       - "--api.dashboard=true"
       - "--api.insecure=true"                      # sadece lokal geliştirme için
@@ -26,6 +28,7 @@ services:
   postgres:
     image: postgres:16
     container_name: postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -48,6 +51,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     networks: [appnet]
@@ -56,6 +60,7 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     container_name: rabbitmq
+    restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
@@ -63,11 +68,18 @@ services:
       - "5672:5672"      # AMQP (servisler buraya bağlanır)
       - "15672:15672"    # Yönetim arayüzü -> http://localhost:15672
     networks: [appnet]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s   # broker'ın yavaş açılışı 'up'ı bozmasın
 
   # --- Object storage (fotoğraf / snap) -----------------------------------
   minio:
     image: minio/minio
     container_name: minio
+    restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -83,6 +95,7 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:1.76.0
     container_name: jaeger
+    restart: unless-stopped
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
@@ -91,12 +104,13 @@ services:
       - "4318:4318"      # OTLP HTTP
     networks: [appnet]
 
-  # --- Referans servis: Auth ----------------------------------------------
-  # Şimdilik sadece /health döndürür. Gerçek mantık (kayıt, JWT, event)
-  # bir sonraki adımda eklenecek. Buradaki amaç uçtan uca yolu kanıtlamak.
+  # --- Auth servisi ---------------------------------------------------------
+  # Kayıt/login/JWT; kayıtta user.registered olayı basar (best-effort);
+  # /verify endpoint'i profile router'ının ForwardAuth hedefidir.
   auth-service:
     build: ./services/auth-service
     container_name: auth-service
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/auth_db
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
@@ -107,6 +121,8 @@ services:
       postgres:
         condition: service_healthy
       rabbitmq:
+        # Sadece sıralama ipucu (started): olay yayını zaten best-effort —
+        # broker sağlıksızken bile auth açılabilmeli ve kayıt alabilmeli.
         condition: service_started
     healthcheck:
       # slim imajda curl yok; python ile /health'e sor
@@ -122,6 +138,75 @@ services:
       - "traefik.http.services.auth.loadbalancer.server.port=8000"
       - "traefik.http.middlewares.auth-strip.stripprefix.prefixes=/api/auth"
       - "traefik.http.routers.auth.middlewares=auth-strip"
+    networks: [appnet]
+
+  # --- Profil servisi ------------------------------------------------------
+  # Kimlik doğrulama BU serviste yok: gateway (ForwardAuth) token'ı auth'a
+  # doğrulatır ve isteğe X-User-Id başlığını koyar. Profiller user.registered
+  # olayından otomatik oluşur (profile-consumer).
+  profile-service:
+    build: ./services/profile-service
+    image: community-profile:dev   # consumer da AYNI imajı kullanır (tek build)
+    container_name: profile-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/profile_db
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      ROOT_PATH: /api/profile
+      # JWT_SECRET bilerek YOK — token işi gateway'de
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.profile.rule=PathPrefix(`/api/profile`)"
+      - "traefik.http.routers.profile.entrypoints=web"
+      - "traefik.http.services.profile.loadbalancer.server.port=8000"
+      # ForwardAuth: her istek önce auth-service /verify'a sorulur (konteyner
+      # adresine doğrudan, gateway prefix'i YOK). 2xx dönerse auth'un yanıt
+      # başlığındaki X-User-Id asıl isteğe kopyalanır (istemcinin gönderdiği
+      # X-User-Id SİLİNİR — taklit imkansız); değilse auth'un 401'i istemciye
+      # aynen döner.
+      - "traefik.http.middlewares.profile-auth.forwardauth.address=http://auth-service:8000/verify"
+      - "traefik.http.middlewares.profile-auth.forwardauth.authResponseHeaders=X-User-Id"
+      - "traefik.http.middlewares.profile-auth.forwardauth.authRequestHeaders=Authorization"
+      - "traefik.http.middlewares.profile-strip.stripprefix.prefixes=/api/profile"
+      # Sıra önemli: önce kimlik (auth), sonra yol soyma (strip)
+      - "traefik.http.routers.profile.middlewares=profile-auth,profile-strip"
+    networks: [appnet]
+
+  # --- Profil olay tüketicisi ----------------------------------------------
+  # Aynı imaj, farklı komut: tek işi user.registered kuyruğunu dinleyip
+  # profil oluşturmak. Çökerse restart policy kaldırır; canlılık heartbeat
+  # dosyasıyla healthcheck'e yansır ("canlı ama takılı" hali de yakalanır).
+  profile-consumer:
+    image: community-profile:dev   # profile-service'in build ettiği imaj
+    pull_policy: never             # registry'den çekmeye çalışma, yerel imajı kullan
+    container_name: profile-consumer
+    command: ["python", "-m", "app.consumer"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/profile_db
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+    depends_on:
+      profile-service:
+        condition: service_healthy   # tabloyu API kurar — create_all yarışı yok
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      # Dosya yoksa da temiz şekilde 'unhealthy' de (traceback fırlatma)
+      test: ["CMD", "python", "-c", "import os,sys,time; p='/tmp/consumer-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 90 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks: [appnet]
 
 networks:

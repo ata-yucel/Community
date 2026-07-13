@@ -1,0 +1,5 @@
+# İmajın içine asla girmemesi gerekenler
+.env
+__pycache__/
+*.pyc
+.venv/

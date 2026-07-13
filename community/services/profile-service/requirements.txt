@@ -8,14 +8,8 @@ psycopg[binary]==3.2.3
 # Ayarlar env'den okunur, eksikse açılışta hata (fail-fast)
 pydantic-settings==2.7.0
 
-# JWT üretimi/doğrulaması
-pyjwt==2.10.1
-
-# Parola hash'leme (Argon2id)
-argon2-cffi==23.1.0
-
-# pydantic EmailStr için gerekli
-email-validator==2.2.0
-
-# RabbitMQ istemcisi (event yayını)
+# RabbitMQ istemcisi (user.registered tüketicisi)
 pika==1.3.2
+
+# NOT: jwt/argon2 bilerek YOK — token doğrulama gateway'de (ForwardAuth),
+# bu servis kimliği X-User-Id başlığından alır.

@@ -10,6 +10,7 @@ _PLACEHOLDERS = {"replace_with_a_long_random_string", "changeme", "secret"}
 
 class Settings(BaseSettings):
     database_url: str
+    rabbitmq_url: str
     jwt_secret: str
     access_token_expire_minutes: int = 30
     root_path: str = ""  # Traefik /api/auth önekini soyar; docs için gerekli

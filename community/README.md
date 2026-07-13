@@ -1,16 +1,35 @@
-# community — Faz 1 (Auth servisi canlı)
+# community — Faz 2 (olay güdümlü mimari canlı)
 
 Konum tabanlı sosyal mobil uygulamanın microservice altyapısı. Faz 0'da
-platform iskeleti kuruldu (gateway + veri katmanı + message broker +
-tracing). Faz 1'de Auth servisi gerçek hale geldi: kayıt, login (JWT) ve
-korumalı `/me` endpoint'i Postgres'e bağlı olarak çalışıyor.
+platform iskeleti kuruldu, Faz 1'de Auth gerçek hale geldi (kayıt, login,
+JWT). Faz 2'de mimarinin olay güdümlü kısmı çalışıyor: kayıt olunca auth
+RabbitMQ'ya `user.registered` olayı basar; **profile-service** bunu dinleyip
+otomatik profil oluşturur; `GET/PUT /api/profile/me` gateway'deki
+ForwardAuth (token doğrulama) arkasından profili okur/günceller.
+
+## Olay akışı (Faz 2)
+
+```
+kayıt -> auth-service ---(user.registered)---> RabbitMQ (community.events)
+                                                    |
+                                             profile.user-registered kuyruğu
+                                                    |
+                                             profile-consumer -> profile_db
+```
+
+- Auth, profili KİMİN oluşturduğunu bilmez; profile, kaydı KİMİN yaptığını
+  bilmez. İkisi de sadece olay sözleşmesini tanır.
+- Tüketici kapalıyken mesajlar kuyrukta bekler (durable kuyruk + kalıcı
+  mesaj); açılınca kaldığı yerden işler. `make queues` ile izle.
+- Aynı olay iki kez gelirse ikincisi sessizce atlanır (user_id PK +
+  ON CONFLICT DO NOTHING = idempotency).
 
 ## Mimari (kısa)
 
 İstemci (Expo) → Traefik (gateway) → servisler. Her servis kendi
 veritabanına sahip (database-per-service). Servisler birbirini doğrudan
-çağırmak yerine RabbitMQ üzerinden event yayınlar. Her istek Jaeger ile
-uçtan uca trace edilir.
+çağırmak yerine RabbitMQ üzerinden event yayınlar. Jaeger ile uçtan uca
+trace edilecek (kablolama ileriki fazda; konteyner şimdiden ayakta).
 
 ## Dizin yapısı
 
@@ -23,13 +42,13 @@ community/
 │   └── postgres/
 │       └── init-multiple-dbs.sh  # servis başına ayrı DB oluşturur
 ├── services/
-│   ├── auth-service/           # ✅ referans servis (FastAPI)
-│   ├── profile-service/        # ⏳ sonra (auth şablonundan klon)
+│   ├── auth-service/           # ✅ kayıt/login/JWT + user.registered olayı
+│   ├── profile-service/        # ✅ API + olay tüketicisi (2 konteyner, 1 imaj)
 │   ├── social-service/         # ⏳
 │   ├── location-service/       # ⏳
 │   ├── chat-service/           # ⏳
 │   └── media-service/          # ⏳
-└── frontend/                   # ⏳ React Native + Expo (Faz 1)
+└── frontend/                   # ⏳ React Native + Expo (Faz 3)
 ```
 
 ## Çalıştırma
@@ -53,8 +72,9 @@ make ps                    # her şey "running" / "healthy" mi?
 | MinIO konsol | http://localhost:9001 | .env'deki kullanıcı/şifre |
 | Jaeger UI | http://localhost:16686 | trace arayüzü |
 
-En kritik test: `make smoke` → register→login→me zincirini uçtan uca
-çalıştırır, sonunda `SMOKE OK` yazmalı.
+En kritik test: `make smoke` → register→login→me→profil→güncelle zincirini
+uçtan uca çalıştırır (profilin olaydan otomatik oluşmasını da doğrular),
+sonunda `SMOKE OK` yazmalı.
 
 ## Auth API (Faz 1)
 
@@ -83,31 +103,68 @@ TOKEN=$(curl -s -X POST http://localhost/api/auth/login \
 curl http://localhost/api/auth/me -H "Authorization: Bearer $TOKEN"
 ```
 
+## Profile API (Faz 2)
+
+Tüm istekler gateway üzerinden ve token zorunlu (ForwardAuth):
+
+```bash
+# login'den TOKEN aldıktan sonra:
+curl http://localhost/api/profile/me -H "Authorization: Bearer $TOKEN"
+curl -X PUT http://localhost/api/profile/me -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"display_name":"Ata","bio":"merhaba"}'
+```
+
+- Profil, kayıttan 1-2 sn sonra otomatik oluşur (`display_name` = email'in
+  @ öncesi). `GET /me` 404 dönerse olay hattı çalışmıyor demektir
+  (`make consumer-logs`).
+- PUT kısmi günceller: yalnızca gönderilen alan değişir; `"bio": null`
+  göndermek bio'yu bilinçli temizler.
+- Token doğrulama profile servisinde DEĞİL, kapıdadır: Traefik her isteği
+  önce auth'un `/verify` endpoint'ine sorar, geçerliyse isteğe `X-User-Id`
+  başlığını koyup iletir. İstemcinin kendi gönderdiği `X-User-Id` Traefik
+  tarafından silinir (taklit edilemez).
+
 ### Bilinçli teknik sınırlar (ve yükseltme yolları)
 
 - **Tablolar `create_all` ile oluşur** — mevcut tabloyu asla DEĞİŞTİRMEZ.
   İlk şema değişikliğinde Alembic (migration aracı) eklenecek.
-- **JWT imzası HS256 (tek ortak gizli anahtar)** — şu an token'ı yalnızca
-  auth-service doğruluyor, bu yüzden yeterli. İkinci bir servis token
-  doğrulamaya başlayacağı an asimetrik anahtara (RS256/EdDSA) geçilecek;
-  `JWT_SECRET` asla servisler arasında paylaşılmayacak.
+- **JWT imzası HS256 (tek gizli anahtar, yalnızca auth'ta)** — diğer
+  servisler token'ı ForwardAuth üzerinden doğrulatır, `JWT_SECRET`
+  paylaşılmaz (kural korunuyor). Gateway'i atlamak zorunda kalan bir servis
+  çıkarsa (ör. websocket) asimetrik anahtara (RS256/EdDSA) geçilecek.
+- **Outbox yok** — kayıt anında broker çökükse olay kaybolur (kayıt
+  etkilenmez, hata loglanır). Ayrıca kuyruk, tüketicinin İLK açılışında
+  tanımlanır: o andan önce yayınlanan olaylar da kaybolur (compose'da her
+  şey birlikte açıldığı için pencere çok küçük). Garantili yayın için
+  outbox pattern ileriki fazda.
+- **DLQ (dead-letter queue) yok** — bozuk mesaj loglanıp düşürülür. DLQ
+  eklenirken dikkat: RabbitMQ kuyruk argümanlarının değişmesine izin vermez;
+  `profile.user-registered` kuyruğunu silip consumer'ı yeniden başlatmak
+  gerekir (kuyruk boşken).
+- **Docker ağı içinden gateway atlanabilir** — appnet üzerindeki bir süreç
+  profile-service'e doğrudan erişip X-User-Id sahteleyebilir. Yalnızca lokal
+  geliştirme için kabul edilebilir; çözüm ileride ağ segmentasyonu/mTLS.
+- **Gateway'den `/api/profile/health` 401 döner** — ForwardAuth tüm prefix'i
+  korur. Bu bozukluk değil: gerçek sağlık sinyali konteyner healthcheck'idir
+  (`make ps`).
+- **db.py/config.py servislere kopyalanır** — bilinçli tercih (kopya,
+  bağımlılıktan ucuz). Üçüncü serviste aynı bug'ı iki kez düzeltirsek ortak
+  pakete çıkarılacak.
 - **Refresh token yok** — süre dolunca yeniden login. Login yanıtındaki
   `expires_in` alanı sayesinde ileride eklemek kırıcı değişiklik olmaz.
-- **Traefik `/api/auth` önekini soyar** — kod içinde route'lar `/register`
-  şeklindedir, `/api/auth/register` değil. Servis `ROOT_PATH` env'i ile
-  öneki bilir (docs URL'leri için).
+- **Traefik önekleri soyar** — kod içinde route'lar `/register`, `/me`
+  şeklindedir. Servisler öneki `ROOT_PATH` env'i ile bilir (docs URL'leri).
 
 ## Bu fazda KASITLI olarak henüz yok
 
-- `user.registered` event'inin RabbitMQ'ya basılması (Faz 2)
 - OpenTelemetry tracing kablolaması (Jaeger ayakta ama servis henüz trace yollamıyor)
 - Prometheus + Grafana + Loki (metrik/log paneli)
-- Diğer servisler ve frontend
+- social / chat / location / media servisleri ve frontend
 
 Bunların hepsi sıradaki adımlarda tek tek eklenecek.
 
-## Sıradaki adım (Faz 2)
+## Sıradaki adım (Faz 3)
 
-Kayıt olduğunda RabbitMQ'ya `user.registered` event'i basmak ve
-profile-service'i bu event'i dinleyip otomatik profil oluşturacak şekilde
-hayata geçirmek. Sonra auth-service diğer servisler için şablon olur.
+React Native + Expo mobil uygulama iskeleti: giriş/kayıt ekranları auth'a,
+profil ekranı profile'a bağlanır. Backend tarafında sıradaki büyük işler:
+OpenTelemetry ile Jaeger'a trace göndermek ve social-service.
