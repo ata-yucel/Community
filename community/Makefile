@@ -1,4 +1,4 @@
-.PHONY: up down logs ps restart auth-logs
+.PHONY: up down logs ps restart auth-logs smoke
 
 up:            ## Tüm servisleri ayağa kaldır (build dahil)
 	docker compose up -d --build
@@ -20,3 +20,17 @@ ps:            ## Çalışan servisleri listele
 
 restart:       ## Yeniden başlat
 	docker compose down && docker compose up -d --build
+
+smoke:         ## Uçtan uca duman testi: register -> login -> me
+	@set -e; \
+	EMAIL="smoke-$$RANDOM@test.com"; \
+	echo "1/3 register ($$EMAIL)"; \
+	curl -sf http://localhost/api/auth/register -H 'Content-Type: application/json' \
+	  -d "{\"email\":\"$$EMAIL\",\"password\":\"smokepass123\"}" > /dev/null; \
+	echo "2/3 login"; \
+	TOKEN=$$(curl -sf http://localhost/api/auth/login -H 'Content-Type: application/json' \
+	  -d "{\"email\":\"$$EMAIL\",\"password\":\"smokepass123\"}" \
+	  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])'); \
+	echo "3/3 me"; \
+	curl -sf http://localhost/api/auth/me -H "Authorization: Bearer $$TOKEN" > /dev/null; \
+	echo "SMOKE OK"

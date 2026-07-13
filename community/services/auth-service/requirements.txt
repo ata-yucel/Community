@@ -1,2 +1,18 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+
+# Veritabanı: SQLAlchemy (ORM) + psycopg (Postgres sürücüsü)
+sqlalchemy==2.0.36
+psycopg[binary]==3.2.3
+
+# Ayarlar env'den okunur, eksikse açılışta hata (fail-fast)
+pydantic-settings==2.7.0
+
+# JWT üretimi/doğrulaması
+pyjwt==2.10.1
+
+# Parola hash'leme (Argon2id)
+argon2-cffi==23.1.0
+
+# pydantic EmailStr için gerekli
+email-validator==2.2.0

@@ -1,4 +1,4 @@
-# community — Faz 0 (platform iskeleti)
+# community — Faz 1 (Auth servisi canlı)
 
 > **Not:** Asıl proje `community/` dizinindedir — compose dosyası, `.env` ve
 > tüm komutlar orada çalışır. Bu dosya yalnızca genel bakış içindir.

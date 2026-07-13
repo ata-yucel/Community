@@ -37,7 +37,9 @@ services:
       - "5432:5432"
     networks: [appnet]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      # -h 127.0.0.1: init sırasındaki geçici sunucu sadece unix socket dinler;
+      # TCP üzerinden sormak "hazır" yanıtının gerçek sunucudan gelmesini garantiler
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -h 127.0.0.1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -79,7 +81,7 @@ services:
 
   # --- Distributed tracing -------------------------------------------------
   jaeger:
-    image: jaegertracing/all-in-one:1.62
+    image: jaegertracing/all-in-one:1.76.0
     container_name: jaeger
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
@@ -96,15 +98,22 @@ services:
     build: ./services/auth-service
     container_name: auth-service
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/auth_db
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/auth_db
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       JWT_SECRET: ${JWT_SECRET}
+      ROOT_PATH: /api/auth   # Traefik prefix soyar; docs/openapi doğru URL üretsin
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_started
+    healthcheck:
+      # slim imajda curl yok; python ile /health'e sor
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     labels:
       - "traefik.enable=true"
       # /api/auth/* -> auth-service, prefix soyularak servise iletilir
