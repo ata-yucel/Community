@@ -1,11 +1,13 @@
-# community — Faz 2 (olay güdümlü mimari canlı)
+# community — Faz 3 (mobil uygulama canlı)
 
 Konum tabanlı sosyal mobil uygulamanın microservice altyapısı. Faz 0'da
 platform iskeleti kuruldu, Faz 1'de Auth gerçek hale geldi (kayıt, login,
 JWT). Faz 2'de mimarinin olay güdümlü kısmı çalışıyor: kayıt olunca auth
 RabbitMQ'ya `user.registered` olayı basar; **profile-service** bunu dinleyip
 otomatik profil oluşturur; `GET/PUT /api/profile/me` gateway'deki
-ForwardAuth (token doğrulama) arkasından profili okur/günceller.
+ForwardAuth (token doğrulama) arkasından profili okur/günceller. Faz 3'te
+mobil uygulama geldi: telefondaki Expo uygulaması kayıt/giriş/profil
+akışını bu backend üzerinden yürütür (`frontend/`).
 
 ## Olay akışı (Faz 2)
 
@@ -48,7 +50,7 @@ community/
 │   ├── location-service/       # ⏳
 │   ├── chat-service/           # ⏳
 │   └── media-service/          # ⏳
-└── frontend/                   # ⏳ React Native + Expo (Faz 3)
+└── frontend/                   # ✅ React Native + Expo mobil uygulama (Faz 3)
 ```
 
 ## Çalıştırma
@@ -154,17 +156,40 @@ curl -X PUT http://localhost/api/profile/me -H "Authorization: Bearer $TOKEN" \
   `expires_in` alanı sayesinde ileride eklemek kırıcı değişiklik olmaz.
 - **Traefik önekleri soyar** — kod içinde route'lar `/register`, `/me`
   şeklindedir. Servisler öneki `ROOT_PATH` env'i ile bilir (docs URL'leri).
+- **Mobil istemci HTTP (şifresiz) konuşur** — yalnızca yerel geliştirme;
+  Expo Go bunu ayarsız kabul eder. Gerçek dağıtımda (EAS build) HTTPS şart.
+- **Mobil proje Expo SDK 54'te sabit** — App Store'daki Expo Go istemcisi
+  54'te beklediği ve tek test yolu Expo Go olduğu için. Mağaza istemcisi
+  güncellenip proje açılmaz olursa: `npx expo install expo@latest --fix`.
+- **Refresh token olmadığı için mobilde oturum 30 dk'da düşer** — korumalı
+  herhangi bir istek 401 dönünce uygulama otomatik çıkış yapar (login ekranı).
+- **Kayıt sonrası mobil, profili 6×1 sn yoklar** — profil olayla asenkron
+  oluştuğu için (smoke'taki 10×1 sn poll'un mobil karşılığı).
+
+## Mobil uygulama (Faz 3)
+
+Telefonda çalışan istemci: React Native + Expo (SDK 54) + TypeScript +
+expo-router. Ekranlar: Giriş, Kayıt, Profil (görüntüle/düzenle, çıkış).
+Kurulum ve çalıştırma: [frontend/README.md](frontend/README.md).
+
+- İstek yolu: Expo uygulaması → `http://<Mac-IP>/api` (Traefik) → servisler.
+  Telefon ve Mac **aynı Wi-Fi ağında** olmalı; test, telefondaki Expo Go
+  uygulamasıyla yapılır (bu Mac'te simülatör yok).
+- Token telefonun şifreli kasasında (expo-secure-store) durur; uygulama
+  açılışında `/auth/me` ile doğrulanır, geçersizse login ekranına düşülür.
+- Kayıt akışı olay hattını uçtan uca kullanır: kayıt → otomatik giriş →
+  profil olayla oluşana dek kısa yoklama → profil ekranı.
 
 ## Bu fazda KASITLI olarak henüz yok
 
 - OpenTelemetry tracing kablolaması (Jaeger ayakta ama servis henüz trace yollamıyor)
 - Prometheus + Grafana + Loki (metrik/log paneli)
-- social / chat / location / media servisleri ve frontend
+- social / chat / location / media servisleri
 
 Bunların hepsi sıradaki adımlarda tek tek eklenecek.
 
-## Sıradaki adım (Faz 3)
+## Sıradaki adım (Faz 4)
 
-React Native + Expo mobil uygulama iskeleti: giriş/kayıt ekranları auth'a,
-profil ekranı profile'a bağlanır. Backend tarafında sıradaki büyük işler:
-OpenTelemetry ile Jaeger'a trace göndermek ve social-service.
+OpenTelemetry ile uçtan uca izleme: Traefik → auth → RabbitMQ →
+profile-consumer zinciri Jaeger'da (localhost:16686) tek trace olarak
+görünecek. Sonrası: social-service.
